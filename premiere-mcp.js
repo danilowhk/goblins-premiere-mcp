@@ -262,13 +262,13 @@ var require_scope = __commonJS({
       }
     };
     exports.ValueScopeName = ValueScopeName;
-    var line = (0, code_1._)`\n`;
+    var line2 = (0, code_1._)`\n`;
     var ValueScope = class extends Scope {
       constructor(opts) {
         super(opts);
         this._values = {};
         this._scope = opts.scope;
-        this.opts = { ...opts, _n: opts.lines ? line : code_1.nil };
+        this.opts = { ...opts, _n: opts.lines ? line2 : code_1.nil };
       }
       get() {
         return this._scope;
@@ -11611,10 +11611,12 @@ __export(install_exports, {
   HELPER_ID: () => HELPER_ID,
   SERVER_NAME: () => SERVER_NAME,
   cepExtensionsDir: () => cepExtensionsDir,
+  findNode: () => findNode,
   install: () => install,
   plan: () => plan,
   realIO: () => realIO,
-  uninstall: () => uninstall
+  uninstall: () => uninstall,
+  winArg: () => winArg
 });
 import { join as join2, posix, win32 } from "node:path";
 function cepExtensionsDir(platform, home, env = {}) {
@@ -11627,7 +11629,7 @@ function cepExtensionsDir(platform, home, env = {}) {
     );
   return posix.join(home, "Library", "Application Support", "Adobe", "CEP", "extensions");
 }
-function plan(platform, home, env = {}) {
+function plan(platform, home, env = {}, node2 = "node") {
   const p = platform === "win32" ? win32 : posix;
   const server = p.join(
     configDir(env, platform, home),
@@ -11652,17 +11654,77 @@ function plan(platform, home, env = {}) {
     "defaults",
     ["write", `com.adobe.CSXS.${v}`, "PlayerDebugMode", "1"]
   ]);
+  const appData = env.APPDATA || p.join(home, "AppData", "Roaming");
+  const claudeDir = platform === "win32" ? p.join(appData, "Claude") : platform === "darwin" ? p.join(home, "Library", "Application Support", "Claude") : p.join(home, ".config", "Claude");
+  const file2 = (id, name, dir, f, format) => ({ id, name, kind: "file", dir, file: p.join(dir, f), format });
+  const agents = [
+    {
+      id: "claude-code",
+      name: "Claude Code",
+      kind: "cli",
+      add: ["claude", ["mcp", "add", "--scope", "user", SERVER_NAME, "--", node2, server]],
+      remove: ["claude", ["mcp", "remove", "--scope", "user", SERVER_NAME]]
+    },
+    {
+      id: "codex",
+      name: "Codex / ChatGPT desktop",
+      kind: "cli",
+      add: ["codex", ["mcp", "add", SERVER_NAME, "--", node2, server]],
+      remove: ["codex", ["mcp", "remove", SERVER_NAME]]
+    },
+    {
+      id: "grok",
+      name: "Grok",
+      kind: "cli",
+      add: ["grok", ["mcp", "add", "--scope", "user", SERVER_NAME, node2, "--", server]],
+      remove: ["grok", ["mcp", "remove", "--scope", "user", SERVER_NAME]]
+    },
+    file2("claude-desktop", "Claude Desktop", claudeDir, "claude_desktop_config.json", "mcpServers"),
+    file2("cursor", "Cursor", p.join(home, ".cursor"), "mcp.json", "mcpServers"),
+    file2(
+      "windsurf",
+      "Windsurf",
+      p.join(home, ".codeium", "windsurf"),
+      "mcp_config.json",
+      "mcpServers"
+    ),
+    file2("gemini", "Gemini CLI", p.join(home, ".gemini"), "settings.json", "mcpServers"),
+    file2("opencode", "opencode", p.join(home, ".config", "opencode"), "opencode.json", "opencode")
+  ];
   return {
     server,
     helper,
+    node: node2,
     debugMode,
-    claudeAdd: ["claude", ["mcp", "add", "--scope", "user", SERVER_NAME, "--", "node", server]],
-    claudeRemove: ["claude", ["mcp", "remove", "--scope", "user", SERVER_NAME]],
-    desktopConfig: { mcpServers: { [SERVER_NAME]: { command: "node", args: [server] } } }
+    agents,
+    generic: { mcpServers: { [SERVER_NAME]: { command: node2, args: [server] } } }
   };
 }
+function editFile(io, a, entry) {
+  const text2 = io.readFile(a.file);
+  let json2 = {};
+  if (text2 != null && text2.trim()) {
+    try {
+      const v = JSON.parse(text2);
+      if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+      json2 = v;
+    } catch {
+      return false;
+    }
+  } else if (!entry) return true;
+  const key = a.format === "opencode" ? "mcp" : "mcpServers";
+  const cur = json2[key];
+  const servers = cur && typeof cur === "object" && !Array.isArray(cur) ? { ...cur } : {};
+  if (entry)
+    servers[SERVER_NAME] = a.format === "opencode" ? { type: "local", command: [entry.command, ...entry.args], enabled: true } : entry;
+  else if (!(SERVER_NAME in servers)) return true;
+  else delete servers[SERVER_NAME];
+  json2[key] = servers;
+  io.writeFile(a.file, JSON.stringify(json2, null, 2) + "\n");
+  return true;
+}
 async function install(io) {
-  const pl = plan(io.platform, io.home, io.env);
+  const pl = plan(io.platform, io.home, io.env, io.node);
   const sep = io.platform === "win32" ? win32 : posix;
   if (!io.exists(sep.join(io.helperSource, "CSXS", "manifest.xml")))
     throw new Error("The Goblins CEP Helper is missing next to this file: " + io.helperSource);
@@ -11676,68 +11738,112 @@ async function install(io) {
   let debugOk = true;
   for (const [cmd, args] of pl.debugMode) if (await io.run(cmd, args) !== 0) debugOk = false;
   io.log(
-    debugOk ? "\u2713 Premiere may load the helper (PlayerDebugMode on for CEP 11 and 12)" : "! Could not turn on PlayerDebugMode. Run these once:\n  " + pl.debugMode.map(([c, a]) => [c, ...a].join(" ")).join("\n  ")
+    debugOk ? "\u2713 Premiere may load the helper (PlayerDebugMode on for CEP 11 and 12)" : "! Could not turn on PlayerDebugMode. Run these once:\n  " + pl.debugMode.map(line).join("\n  ")
   );
-  await io.run(...pl.claudeRemove);
-  const added = await io.run(...pl.claudeAdd) === 0;
+  const entry = pl.generic.mcpServers[SERVER_NAME];
+  const added = [];
+  for (const a of pl.agents) {
+    if (a.kind === "cli") {
+      const removed = await io.run(...a.remove);
+      if (removed === 127) continue;
+      const code = await io.run(...a.add);
+      if (code === 0) added.push(a.name);
+      else io.log(`! ${a.name}: could not add it. Run:
+  ${line(a.add)}`);
+    } else {
+      if (!io.exists(a.dir)) continue;
+      if (editFile(io, a, entry)) added.push(a.name);
+      else
+        io.log(
+          `! ${a.name}: ${a.file} is not valid JSON, left as it is. Add this to it:
+` + JSON.stringify(pl.generic, null, 2)
+        );
+    }
+  }
   io.log(
-    added ? '\u2713 Added to Claude Code (user scope) as "goblins-premiere"' : "- Claude Code not found: add it later with\n  " + [pl.claudeAdd[0], ...pl.claudeAdd[1]].join(" ")
+    added.length ? `\u2713 Added "${SERVER_NAME}" to: ${added.join(", ")}` : "- No AI agent found on this computer."
   );
   io.log(
-    '\nClaude Desktop: Settings \u203A Developer \u203A Edit Config, then add to "mcpServers":\n' + JSON.stringify(pl.desktopConfig.mcpServers, null, 2) + '\n\nNext:\n  1. Restart Premiere Pro.\n  2. Window \u203A Extensions \u203A Goblins CEP Helper (keep it open, it can stay docked).\n  3. In the Goblins Edit Recorder panel: MCP \u203A Connect this panel to Goblins Premiere, and\n     enter the code your AI shows (ask it to "pair with Premiere").'
+    "\nAny other agent that runs MCP servers on this computer: add this to its MCP configuration\n" + JSON.stringify(pl.generic, null, 2) + '\n(Chat websites such as chatgpt.com or grok.com cannot reach a server on your computer.)\n\nNext:\n  1. Restart Premiere Pro, and restart your AI app so it sees the new server.\n  2. Window \u203A Extensions \u203A Goblins CEP Helper (keep it open, it can stay docked).\n  3. In the Goblins Edit Recorder panel: MCP \u203A Connect this panel to Goblins Premiere, and\n     enter the code your AI shows (ask it to "pair with Premiere").'
   );
   return pl;
 }
 async function uninstall(io) {
-  const pl = plan(io.platform, io.home, io.env);
+  const pl = plan(io.platform, io.home, io.env, io.node);
   if (io.exists(pl.helper)) io.remove(pl.helper);
   if (io.exists(pl.server)) io.remove(pl.server);
-  await io.run(...pl.claudeRemove);
-  io.log("Removed the Goblins CEP Helper, the server file and the Claude Code entry.");
+  for (const a of pl.agents) {
+    if (a.kind === "cli") await io.run(...a.remove);
+    else if (io.exists(a.file)) editFile(io, a, null);
+  }
+  io.log("Removed the Goblins CEP Helper, the server file and the AI agent entries.");
   io.log("PlayerDebugMode is left as it is (other extensions may need it).");
   return pl;
+}
+function findNode(env, platform, exists, fallback) {
+  const p = platform === "win32" ? win32 : posix;
+  const dirs = (env.PATH || env.Path || "").split(platform === "win32" ? ";" : ":");
+  for (const d of dirs) {
+    if (!d) continue;
+    const f = p.join(d, platform === "win32" ? "node.exe" : "node");
+    if (exists(f)) return f;
+  }
+  return fallback;
+}
+function winArg(a) {
+  return /[\s"&|<>^]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a;
 }
 async function realIO(selfFile) {
   const fs = await import("node:fs");
   const { spawn } = await import("node:child_process");
   const { homedir: homedir2 } = await import("node:os");
   const { dirname: dirname4 } = await import("node:path");
+  const exists = (p) => {
+    try {
+      fs.lstatSync(p);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const win = process.platform === "win32";
   return {
     platform: process.platform,
     home: homedir2(),
     env: process.env,
     selfFile,
     helperSource: join2(dirname4(selfFile), "cep-helper"),
-    exists: (p) => {
-      try {
-        fs.lstatSync(p);
-        return true;
-      } catch {
-        return false;
-      }
-    },
+    node: findNode(process.env, process.platform, exists, process.execPath),
+    exists,
     mkdir: (p) => fs.mkdirSync(p, { recursive: true }),
     copyFile: (a, b) => fs.copyFileSync(a, b),
     copyDir: (a, b) => fs.cpSync(a, b, { recursive: true, dereference: true }),
     remove: (p) => fs.rmSync(p, { recursive: true, force: true }),
+    readFile: (p) => {
+      try {
+        return fs.readFileSync(p, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    writeFile: (p, t) => fs.writeFileSync(p, t),
     run: (cmd, args) => new Promise((resolve) => {
-      const child = spawn(cmd, args, {
-        stdio: "ignore",
-        shell: process.platform === "win32" && cmd === "claude"
-      });
+      const shell = win && cmd !== "reg";
+      const child = spawn(cmd, shell ? args.map(winArg) : args, { stdio: "ignore", shell });
       child.on("error", () => resolve(127));
-      child.on("exit", (code) => resolve(code ?? 1));
+      child.on("exit", (code) => resolve(code === 9009 ? 127 : code ?? 1));
     }),
-    log: (line) => process.stdout.write(line + "\n")
+    log: (l) => process.stdout.write(l + "\n")
   };
 }
-var HELPER_ID, SERVER_NAME;
+var HELPER_ID, SERVER_NAME, line;
 var init_install = __esm({
   "packages/premiere-mcp/src/install.ts"() {
     "use strict";
     init_hub();
     HELPER_ID = "com.livus.goblins.cephelper";
     SERVER_NAME = "goblins-premiere";
+    line = ([c, a]) => [c, ...a].map((x) => /\s/.test(x) ? `"${x}"` : x).join(" ");
   }
 });
 
@@ -17958,8 +18064,8 @@ var Doc = class {
     const lines = content.split("\n").filter((x) => x);
     const minIndent = Math.min(...lines.map((x) => x.length - x.trimStart().length));
     const dedented = lines.map((x) => x.slice(minIndent)).map((x) => " ".repeat(this.indent * 2) + x);
-    for (const line of dedented) {
-      this.content.push(line);
+    for (const line2 of dedented) {
+      this.content.push(line2);
     }
   }
   compile() {
@@ -41058,16 +41164,16 @@ var ReadBuffer = class {
     if (index === -1) {
       return null;
     }
-    const line = this._buffer.toString("utf8", 0, index).replace(/\r$/, "");
+    const line2 = this._buffer.toString("utf8", 0, index).replace(/\r$/, "");
     this._buffer = this._buffer.subarray(index + 1);
-    return deserializeMessage(line);
+    return deserializeMessage(line2);
   }
   clear() {
     this._buffer = void 0;
   }
 };
-function deserializeMessage(line) {
-  return JSONRPCMessageSchema.parse(JSON.parse(line));
+function deserializeMessage(line2) {
+  return JSONRPCMessageSchema.parse(JSON.parse(line2));
 }
 function serializeMessage(message) {
   return JSON.stringify(message) + "\n";

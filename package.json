@@ -1,7 +1,7 @@
 {
   "name": "goblins-premiere-mcp",
-  "version": "0.3.3",
-  "description": "Goblins Premiere: lets your AI agent read and edit the open Premiere Pro timeline through the Goblins Edit Recorder panel, with your approval for each edit.",
+  "version": "0.3.5",
+  "description": "Goblins Premiere: lets your AI agent (Claude, ChatGPT/Codex, Grok, Cursor and others) read and edit the open Premiere Pro timeline through the Goblins Edit Recorder panel, with your approval for each edit.",
   "type": "module",
   "bin": {
     "goblins-premiere-mcp": "premiere-mcp.js"
