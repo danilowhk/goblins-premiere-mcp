@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Goblins CEP Helper</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 12px;
+        background: #232323;
+        color: #d6d6d6;
+        font:
+          12px -apple-system,
+          'Helvetica Neue',
+          sans-serif;
+      }
+      h1 {
+        font-size: 12px;
+        font-weight: 600;
+        margin: 0 0 8px;
+      }
+      #code {
+        font-size: 28px;
+        letter-spacing: 4px;
+        font-variant-numeric: tabular-nums;
+        margin: 8px 0;
+        color: #fff;
+      }
+      #code:empty {
+        display: none;
+      }
+      button {
+        margin-top: 12px;
+        background: #3a3a3a;
+        color: #d6d6d6;
+        border: 1px solid #555;
+        border-radius: 4px;
+        padding: 4px 8px;
+      }
+      small {
+        color: #8a8a8a;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Goblins CEP Helper <small id="version"></small></h1>
+    <div id="status"></div>
+    <div id="code"></div>
+    <p>
+      <small
+        >Runs only razor, speed, clip volume and XML import, and only after you approve them in the
+        Goblins Edit Recorder panel. Keep this panel open (it can stay docked or minimised).</small
+      >
+    </p>
+    <button id="forget" type="button">Pair again</button>
+    <script src="js/helper.js"></script>
+  </body>
+</html>
