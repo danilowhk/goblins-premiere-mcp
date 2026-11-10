@@ -1,4 +1,4 @@
-# Goblins Premiere (MCP) 0.3.5
+# Goblins Premiere (MCP) 0.3.6
 
 Lets your AI agent (Claude, ChatGPT/Codex, Grok, Cursor, Windsurf, Gemini CLI, opencode, or any
 agent that runs MCP servers) read and edit the Premiere Pro timeline that is

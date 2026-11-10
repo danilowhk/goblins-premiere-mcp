@@ -3207,8 +3207,8 @@ var require_utils = __commonJS({
       }
       if (bestLength < 2) return hextets.join(":");
       const head = hextets.slice(0, bestStart).join(":");
-      const tail = hextets.slice(bestStart + bestLength).join(":");
-      return head + "::" + tail;
+      const tail2 = hextets.slice(bestStart + bestLength).join(":");
+      return head + "::" + tail2;
     }
     function normalizeIPv6Address(input2) {
       const compression = input2.indexOf("::");
@@ -11083,7 +11083,7 @@ var init_hub = __esm({
     init_wrapper();
     init_ai_edit();
     init_local_paths();
-    HUB_VERSION = "0.3.3";
+    HUB_VERSION = "0.3.6";
     MAX_FRAME = 4 * 1024 * 1024;
     PAIR_ATTEMPTS = 5;
     PAIR_TTL_MS = 5 * 6e4;
@@ -11136,6 +11136,8 @@ var init_hub = __esm({
       hubId = "h_" + b64url(randomBytes(16)).slice(0, 22);
       port = 0;
       wss = null;
+      /** The same port on ::1: Windows resolves "localhost" to IPv6 first (UXP tries localhost). */
+      wss6 = null;
       conns = /* @__PURE__ */ new Map();
       pending = /* @__PURE__ */ new Map();
       pairings = /* @__PURE__ */ new Map();
@@ -11155,7 +11157,7 @@ var init_hub = __esm({
           port: this.opts.port ?? 0,
           path: "/goblins-premiere",
           maxPayload: MAX_FRAME,
-          verifyClient: (info) => this.allowed(info)
+          verifyClient: (info) => this.verify(info)
         });
         await new Promise((resolve, reject) => {
           wss.once("listening", () => resolve());
@@ -11163,7 +11165,25 @@ var init_hub = __esm({
         });
         this.wss = wss;
         this.port = wss.address().port;
-        wss.on("connection", (ws) => this.accept(ws));
+        wss.on("connection", (ws, req) => this.accept(ws, req));
+        try {
+          const wss6 = new import_websocket_server.default({
+            host: "::1",
+            port: this.port,
+            path: "/goblins-premiere",
+            maxPayload: MAX_FRAME,
+            verifyClient: (info) => this.verify(info)
+          });
+          await new Promise((resolve, reject) => {
+            wss6.once("listening", () => resolve());
+            wss6.once("error", reject);
+          });
+          wss6.on("connection", (ws, req) => this.accept(ws, req));
+          this.wss6 = wss6;
+        } catch {
+          this.log("IPv6 loopback (::1) not available; panels connect through 127.0.0.1");
+        }
+        this.log(`listening on 127.0.0.1:${this.port}${this.wss6 ? " and [::1]:" + this.port : ""}`);
         this.pingTimer = setInterval(() => this.ping(), this.opts.pingMs ?? 15e3);
         this.pingTimer.unref?.();
         if (this.opts.discovery) {
@@ -11188,6 +11208,7 @@ var init_hub = __esm({
         this.pending.clear();
         for (const c of this.conns.values()) c.ws.terminate();
         await new Promise((r) => this.wss ? this.wss.close(() => r()) : r());
+        await new Promise((r) => this.wss6 ? this.wss6.close(() => r()) : r());
         if (this.opts.discovery) {
           try {
             const v = JSON.parse(await readFile(this.opts.discovery, "utf8"));
@@ -11206,14 +11227,33 @@ var init_hub = __esm({
        * Host must be this loopback port (no DNS rebinding through another name).
        */
       allowed(info) {
+        return this.refusal(info) === null;
+      }
+      /** Why a WebSocket handshake is refused, or null when it is let in. */
+      refusal(info) {
         const origin = String(info.origin ?? info.req.headers.origin ?? "");
         const ua = String(info.req.headers["user-agent"] ?? "");
-        const premiere = origin === "file://" && (/^WebSocket\+\+\//.test(ua) || /\bAdobeCEP\/\d/.test(ua));
-        if (!premiere && /^(https?|file|chrome-extension|moz-extension):/i.test(origin)) return false;
+        const browser = /\bMozilla\//.test(ua) && !/\bAdobeCEP\/\d/.test(ua);
+        const premiere = origin === "file://" && !browser;
+        if (!premiere && /^(https?|file|chrome-extension|moz-extension):/i.test(origin))
+          return origin === "file://" ? "browser User-Agent with Origin file://" : "web Origin";
         const host = String(info.req.headers.host ?? "");
-        if (host && host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`)
-          return false;
-        return info.req.socket.remoteAddress === "127.0.0.1" || info.req.socket.remoteAddress === "::ffff:127.0.0.1";
+        if (host && host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}` && host !== `[::1]:${this.port}`)
+          return "Host header is not this loopback port";
+        const from = info.req.socket.remoteAddress;
+        if (from !== "127.0.0.1" && from !== "::ffff:127.0.0.1" && from !== "::1")
+          return "not from this computer";
+        return null;
+      }
+      verify(info) {
+        const why = this.refusal(info);
+        if (why) {
+          const h = info.req.headers;
+          this.log(
+            `refused a panel connection: ${why} (origin=${JSON.stringify(String(info.origin ?? h.origin ?? ""))} user-agent=${JSON.stringify(String(h["user-agent"] ?? "").slice(0, 160))} host=${JSON.stringify(String(h.host ?? ""))} from=${info.req.socket.remoteAddress})`
+          );
+        }
+        return !why;
       }
       async loadHubId(path) {
         try {
@@ -11242,7 +11282,7 @@ var init_hub = __esm({
         await writeFile(path, JSON.stringify(body), { mode: 384 });
         await chmod(path, 384);
       }
-      accept(ws) {
+      accept(ws, req) {
         const conn = {
           ws,
           connId: "c" + ++this.seq,
@@ -11273,7 +11313,13 @@ var init_hub = __esm({
             return this.send(conn, { type: "error", code: "unknown_type" });
           this.onFrame(conn, msg).catch((e) => this.log("frame error: " + (e?.message ?? e)));
         });
-        ws.on("close", () => {
+        this.log(
+          `panel connection ${conn.connId} opened from ${req?.socket.remoteAddress ?? "?"} (user-agent ${JSON.stringify(String(req?.headers["user-agent"] ?? "").slice(0, 80))})`
+        );
+        ws.on("close", (code, reason) => {
+          this.log(
+            `panel connection ${conn.connId} closed: code ${code}${reason?.length ? " " + String(reason) : ""} (hello ${conn.engineId ? "received" : "not received"}, ${conn.authed ? "authenticated" : "not authenticated"})`
+          );
           clearTimeout(helloTimer);
           this.conns.delete(conn.connId);
           if (conn.pairId) this.pairings.delete(conn.pairId);
@@ -41590,7 +41636,67 @@ function isMainModule(metaUrl, argv1) {
   }
 }
 
+// packages/premiere-mcp/src/diagnostics.ts
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+function fileLogger(path, maxBytes = 256 * 1024, now = () => /* @__PURE__ */ new Date()) {
+  return (msg) => {
+    try {
+      try {
+        if (statSync(path).size > maxBytes) {
+          const text2 = readFileSync(path, "utf8");
+          writeFileSync(path, text2.slice(text2.indexOf("\n", text2.length / 2) + 1));
+        }
+      } catch {
+      }
+      appendFileSync(path, `${now().toISOString()} ${msg.replace(/\s+/g, " ")}
+`);
+    } catch {
+    }
+  };
+}
+function doctorReport(f) {
+  const out = [`Goblins Premiere doctor \xB7 MCP ${f.version} \xB7 ${f.platform}`, ""];
+  const port = Number(f.discovery?.port);
+  if (!f.discovery) {
+    out.push(
+      `\u2717 No running Goblins Premiere MCP (no ${f.discoveryPath}).`,
+      "  Open your AI app (it starts the MCP), then run this again."
+    );
+  } else {
+    out.push(`\u2713 Discovery file: ${f.discoveryPath} (port ${port}, process ${f.discovery.pid})`);
+    out.push(
+      f.pidAlive ? "\u2713 The MCP process is running." : "\u2717 The MCP process in the discovery file is not running: restart your AI app."
+    );
+    for (const host of ["127.0.0.1", "::1"]) {
+      const r = f.reach[host];
+      if (r === null) continue;
+      out.push(
+        r ? `\u2713 Port ${port} answers on ${host}.` : `${host === "::1" ? "-" : "\u2717"} Port ${port} does not answer on ${host}.`
+      );
+    }
+  }
+  out.push("", `Recent panel connections (${f.logPath}):`);
+  if (!f.logTail.length)
+    out.push('  (nothing logged yet: turn "Connect this panel" On, then run this again)');
+  else out.push(...f.logTail.map((l) => "  " + l));
+  out.push(
+    "",
+    'What to look for: "refused a panel connection: <reason>" means the MCP turned the panel away;',
+    '"closed: code <n>" shows how an open connection ended; no line at all after turning the panel',
+    "On means Premiere never reached the MCP (permission or address)."
+  );
+  return out.join("\n");
+}
+function tail(path, n = 40) {
+  try {
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).slice(-n);
+  } catch {
+    return [];
+  }
+}
+
 // packages/premiere-mcp/src/index.ts
+var logPath = (discovery) => join3(dirname3(discovery), "premiere-mcp.log");
 function createServer(hub) {
   const server = new McpServer(
     { name: "goblins-premiere", version: HUB_VERSION },
@@ -41609,7 +41715,13 @@ async function main(env = process.env) {
     store,
     discovery,
     port,
-    log: (m) => process.stderr.write("goblins-premiere: " + m + "\n")
+    log: (() => {
+      const toFile = fileLogger(logPath(discovery));
+      return (m) => {
+        process.stderr.write("goblins-premiere: " + m + "\n");
+        toFile(`[${process.pid}] ${m}`);
+      };
+    })()
   });
   await hub.start();
   const server = createServer(hub);
@@ -41620,9 +41732,55 @@ async function main(env = process.env) {
   process.on("SIGTERM", shutdown);
   return { hub, server };
 }
+async function doctor(env = process.env) {
+  const { readFile: readFile3 } = await import("node:fs/promises");
+  const net = await import("node:net");
+  const discovery = env.GOBLINS_PREMIERE_DISCOVERY || discoveryPath(env);
+  let found = null;
+  try {
+    found = JSON.parse(await readFile3(discovery, "utf8"));
+  } catch {
+  }
+  const port = Number(found?.port);
+  const pid = Number(found?.pid);
+  let pidAlive = null;
+  if (found && Number.isInteger(pid) && pid > 0)
+    try {
+      process.kill(pid, 0);
+      pidAlive = true;
+    } catch (e) {
+      pidAlive = e?.code === "EPERM";
+    }
+  const reachable = (host) => new Promise((resolve) => {
+    if (!found || !Number.isInteger(port)) return resolve(null);
+    const s = net.connect({ host, port, timeout: 1500 }, () => {
+      s.destroy();
+      resolve(true);
+    });
+    s.on("error", () => resolve(false));
+    s.on("timeout", () => {
+      s.destroy();
+      resolve(false);
+    });
+  });
+  process.stdout.write(
+    doctorReport({
+      version: HUB_VERSION,
+      platform: `${process.platform} ${process.arch}, Node ${process.versions.node}`,
+      discoveryPath: discovery,
+      discovery: found,
+      pidAlive,
+      reach: { "127.0.0.1": await reachable("127.0.0.1"), "::1": await reachable("::1") },
+      logPath: logPath(discovery),
+      logTail: tail(logPath(discovery), 40)
+    }) + "\n"
+  );
+}
 if (isMainModule(import.meta.url, process.argv[1])) {
   const cmd = process.argv[2];
-  if (cmd === "install" || cmd === "uninstall") {
+  if (cmd === "doctor") {
+    await doctor();
+  } else if (cmd === "install" || cmd === "uninstall") {
     const { install: install2, uninstall: uninstall2, realIO: realIO2 } = await Promise.resolve().then(() => (init_install(), install_exports));
     const { fileURLToPath: fileURLToPath2 } = await import("node:url");
     const io = await realIO2(fileURLToPath2(import.meta.url));
@@ -41639,6 +41797,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
 export {
   createServer,
   isMainModule,
+  logPath,
   main
 };
 //# sourceMappingURL=index.js.map
